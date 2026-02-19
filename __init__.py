@@ -14,8 +14,8 @@ stats = {
     "session_correct": 0,
     "session_total": 0,
     "current_miss_streak": 0,
-    "session_start_time": 0,
-    "card_start_time": 0  
+    "session_time_spent": 0,
+    "last_time_check": time.time()
 }
 
 # The history stack for our custom undo logic
@@ -46,6 +46,7 @@ def save_config(config):
 def check_daily_rollover(config):
     today_str = str(date.today())
     if config.get("daily_date") != today_str:
+        # Day changed! Reset Daily Config
         config["daily_date"] = today_str
         config["daily_reviews"] = 0
         config["daily_correct"] = 0
@@ -53,25 +54,46 @@ def check_daily_rollover(config):
         config["daily_worst_miss_streak"] = 0
         config["daily_time_spent"] = 0
         save_config(config)
-    return config
-
-def on_state_change(state, old_state):
-    if state == "review" and old_state != "review":
-        stats["session_start_time"] = time.time()
-        stats["card_start_time"] = time.time()
+        
+        # Also strictly reset the session stats since it's a new day
         stats["current_streak"] = 0
         stats["session_correct"] = 0
         stats["session_total"] = 0
         stats["current_miss_streak"] = 0
+        stats["session_time_spent"] = 0
+        stats["last_time_check"] = time.time()
         global undo_stack
-        undo_stack.clear() 
+        undo_stack.clear()
+        
+    return config
+
+def update_timers(config):
+    now = time.time()
+    elapsed = now - stats.get("last_time_check", now)
+    
+    # Cap idle time at 60 seconds per interaction to maintain accurate active time
+    if elapsed > 60:
+        elapsed = 60
+        
+    # Both timers now pulse in perfect unison
+    stats["session_time_spent"] += elapsed
+    config["daily_time_spent"] += elapsed
+    
+    stats["last_time_check"] = now
+    return config
+
+def on_state_change(state, old_state):
+    # We no longer wipe stats here. This simply resets the timer baseline 
+    # so you don't get a 60s bump immediately upon returning to a deck.
+    if state == "review" and old_state != "review":
+        stats["last_time_check"] = time.time()
 
 def on_answer(reviewer, card, ease):
     global undo_stack
     config = get_config()
     config = check_daily_rollover(config) 
+    config = update_timers(config)
     
-    # --- UNDO PREP: Save the exact state before altering it ---
     undo_stack.append({
         "stats": copy.deepcopy(stats),
         "config": copy.deepcopy(config)
@@ -79,16 +101,7 @@ def on_answer(reviewer, card, ease):
     
     if len(undo_stack) > 50:
         undo_stack.pop(0)
-
-    # --- TIME TRACKING ---
-    now = time.time()
-    time_on_card = now - stats.get("card_start_time", now)
-    
-    if time_on_card > 60:
-        time_on_card = 60
-    config["daily_time_spent"] += time_on_card
-    
-    # --- SCORING ---
+        
     stats["session_total"] += 1
     config["daily_reviews"] += 1
 
@@ -134,31 +147,27 @@ def on_answer(reviewer, card, ease):
             
         save_config(config)
 
-# --- UNDO FIX FOR ANKI 25.09 ---
 def handle_undo():
     global undo_stack
     if undo_stack:
         last_state = undo_stack.pop()
         stats.update(last_state["stats"])
         save_config(last_state["config"])
-        stats["card_start_time"] = time.time()
+        stats["last_time_check"] = time.time() # Ensures the undo gap doesn't break the timer
 
-# Hook directly into the Qt UI action rather than the deprecated module
 mw.form.actionUndo.triggered.connect(handle_undo)
 
-# --- JAVASCRIPT BRIDGE FOR CLEAR BUTTON ---
 def on_webview_msg(handled, message, context):
     if message == "gamified_clear_session":
-        stats["session_start_time"] = time.time()
-        stats["card_start_time"] = time.time()
         stats["current_streak"] = 0
         stats["session_correct"] = 0
         stats["session_total"] = 0
         stats["current_miss_streak"] = 0
+        stats["session_time_spent"] = 0
+        stats["last_time_check"] = time.time()
         global undo_stack
         undo_stack.clear()
         
-        # Tell Anki to immediately redraw the card to show the reset stats
         mw.reviewer.refresh_if_needed()
         return (True, None)
     return handled
@@ -166,17 +175,14 @@ def on_webview_msg(handled, message, context):
 gui_hooks.webview_did_receive_js_message.append(on_webview_msg)
 
 def append_stats_to_html(text, card, kind):
-    if stats["session_start_time"] == 0:
-        return text
-        
     config = get_config()
     config = check_daily_rollover(config)
+    config = update_timers(config)
+    save_config(config) # Ensures idle time saves even if you close Anki without answering
     
-    stats["card_start_time"] = time.time()
-    
-    elapsed = int(time.time() - stats["session_start_time"])
-    mins, secs = divmod(elapsed, 60)
-    timer_str = f"{mins:02d}:{secs:02d}"
+    s_elapsed = int(stats.get("session_time_spent", 0))
+    s_mins, s_secs = divmod(s_elapsed, 60)
+    timer_str = f"{s_mins:02d}:{s_secs:02d}"
     
     daily_elapsed = int(config.get("daily_time_spent", 0))
     d_hours, remainder = divmod(daily_elapsed, 3600)
