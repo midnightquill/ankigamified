@@ -1,4 +1,9 @@
 {
+    "daily_goal": 100,
+    "sound_mode": "all",
+    "sound_volume": 0.35,
+    "show_details": false,
+    "animations": true,
     "best_streak": 0,
     "worst_miss_streak": 0
 }
